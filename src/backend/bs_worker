@@ -3992,6 +3992,7 @@ sub dobuild {
   my $release = $buildinfo->{'release'};
   my $disturl;
   $disturl = $buildinfo->{'disturl'} if $buildinfo->{'disturl'} && !$bconf->{'buildflags:nodisturl'};
+  local $::ENV{BUILD_RPM_BUILD_STAGE} = '-bb' if $bconf->{'buildflags:nosrcrpm'};
 
   my @args;
   push @args, $helper if $helper;
