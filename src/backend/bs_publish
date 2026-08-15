@@ -2462,8 +2462,8 @@ sub publish {
 
   # content-digest filenames requested? (PublishFlags: uniquefilenames[:<digits>])
   my $uniquefilenames = $config->{'publishflags:uniquefilenames'} || 0;
-  $uniquefilenames = 12 if $uniquefilenames eq '1';
-  if ($uniquefilenames && ($uniquefilenames !~ /^\d+$/ || $uniquefilenames < 4 || $uniquefilenames > 32)) {
+  $uniquefilenames = 6 if $uniquefilenames eq '1';
+  if ($uniquefilenames && ($uniquefilenames !~ /^\d+$/ || $uniquefilenames < 1 || $uniquefilenames > 14)) {
     print "    ignoring unusable uniquefilenames publish flag value '$uniquefilenames'\n";
     $uniquefilenames = 0;
   }

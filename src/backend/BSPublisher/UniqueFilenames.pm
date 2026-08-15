@@ -27,14 +27,16 @@ use Build;
 
 use strict;
 
-# insert a digest component before the arch:
-#   bash-5.2.15-1.2.x86_64.rpm -> bash-5.2.15-1.2.a3f9c1d20b7e.x86_64.rpm
+# insert a decimal digest component before the arch:
+#   bash-5.2.15-1.2.x86_64.rpm -> bash-5.2.15-1.2.952382.x86_64.rpm
+# the value is derived from the first 48 bits of the digest, hence
+# at most 14 digits
 sub digestname {
   my ($p, $digest, $digits) = @_;
   return $p unless $digest && $p =~ /\.([^.\/]+)\.(d?rpm)$/;
-  my $hex = substr($digest, 0, $digits);
-  return $p if $p =~ /\.\Q$hex\E\.[^.\/]+\.d?rpm$/;	# already digested
-  $p =~ s/\.([^.\/]+)\.(d?rpm)$/.$hex.$1.$2/;
+  my $dec = sprintf("%0${digits}u", hex(substr($digest, 0, 12)) % 10 ** $digits);
+  return $p if $p =~ /\.\Q$dec\E\.[^.\/]+\.d?rpm$/;	# already digested
+  $p =~ s/\.([^.\/]+)\.(d?rpm)$/.$dec.$1.$2/;
   return $p;
 }
 
