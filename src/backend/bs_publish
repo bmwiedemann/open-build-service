@@ -62,6 +62,7 @@ use BSRepServer::Containerinfo;
 use BSPublisher::Container;
 use BSPublisher::Helm;
 use BSPublisher::Util;
+use BSPublisher::UniqueFilenames;
 use BSPublisher::Blobstore;
 use BSPublisher::Diffnotify;
 
@@ -755,6 +756,10 @@ sub createrepo_rpmmd {
       delete $up->{'blocked_in_product'};
       for my $cl (@{($up->{'pkglist'} || {})->{'collection'} || []}) {
         for my $pkg (@{$cl->{'package'} || []}) {
+          if ($data->{'renamed'} && %{$data->{'renamed'}} && $pkg->{'filename'} && $pkg->{'arch'}) {
+            my $pn = ($data->{'subdir'} ? "$data->{'subdir'}/" : '') . "$pkg->{'arch'}/$pkg->{'filename'}";
+            $pkg->{'filename'} = $1 if $data->{'renamed'}->{$pn} && $data->{'renamed'}->{$pn} =~ /([^\/]+)$/s;
+          }
           if ($pkg->{'embargo_date'} && $pkg->{'embargo_date'} =~ /^(\d+)-(\d+)-(\d+)(?: (\d+):(\d+))?/) {
             # normalize in case of missing 0 prefixes
             my $t = sprintf("%04d-%02d-%02d %02d:%02d", $1, $2, $3, $4 || 0, $5 || 0);
@@ -2455,6 +2460,19 @@ sub publish {
     return;
   }
 
+  # content-digest filenames requested? (PublishFlags: uniquefilenames[:<digits>])
+  my $uniquefilenames = $config->{'publishflags:uniquefilenames'} || 0;
+  $uniquefilenames = 12 if $uniquefilenames eq '1';
+  if ($uniquefilenames && ($uniquefilenames !~ /^\d+$/ || $uniquefilenames < 4 || $uniquefilenames > 32)) {
+    print "    ignoring unusable uniquefilenames publish flag value '$uniquefilenames'\n";
+    $uniquefilenames = 0;
+  }
+  if ($uniquefilenames) {
+    for (grep {$repotype{$_}} qw{susetags debian arch apk hdlist2}) {
+      print "    warning: uniquefilenames does not cover repotype $_\n";
+    }
+  }
+
   if ($BSConfig::publisher_compile_content_hook && $BSConfig::publisher_compile_content_hook->{$prp}) {
     my $hook = $BSConfig::publisher_compile_content_hook->{$prp};
     $hook = [ $hook ] unless ref $hook;
@@ -2856,6 +2874,18 @@ sub publish {
     }
   }
 
+  # rename binaries to content-digest filenames if requested
+  my $bindigests = {};
+  my $renamed = {};
+  if ($uniquefilenames) {
+    if (-s "$reporoot/$prp/:repoinfo") {
+      my $oldinfo = BSUtil::retrieve("$reporoot/$prp/:repoinfo", 1) || {};
+      $bindigests = $oldinfo->{'bindigests'} || {};
+    }
+    $renamed = BSPublisher::UniqueFilenames::rename_bins(\%bins, \%bins_id, $binaryorigins, \%deltainfos, $uniquefilenames, $bindigests);
+    print "    using content-digest filenames for ".scalar(keys(%$renamed))." binaries\n" if %$renamed;
+  }
+
   my $changed = 0;
   my @changed;  	# all changed files for hooks.
 
@@ -3106,6 +3136,7 @@ sub publish {
   $state .= "\0".$deltainfos_state if $deltainfos_state;
   $state .= "\0".$container_state if $container_state;
   $state .= "\0".$modulemds_state if $modulemds_state;
+  $state .= "\0uniquefilenames:$uniquefilenames" if $uniquefilenames;
   $state = Digest::MD5::md5_hex($state) if $state ne '';
 
   # get us the old repoinfo, so we can compare the state
@@ -3320,6 +3351,7 @@ sub publish {
 	for my $cl (@{($up->{'pkglist'} || {})->{'collection'} || []}) {
 	  for my $pkg (@{$cl->{'package'} || []}) {
 	    my $pn = ($subdir ? "$subdir/" : '') . "$pkg->{'arch'}/$pkg->{'filename'}";
+	    $pn = $renamed->{$pn} if $renamed->{$pn};
 	    if ($packtrack->{$pn}) {
 	      $packtrack->{$pn}->{'patchinforef'} = $up->{'patchinforef'} if $up->{'patchinforef'};
 	      $packtrack->{$pn}->{'updateinfoid'} = $up->{'id'};
@@ -3348,6 +3380,7 @@ sub publish {
     'repotype' => \%repotype,
   };
   $repoinfo->{'projectkind'} = $proj->{'kind'} if $proj->{'kind'};
+  $repoinfo->{'bindigests'} = $bindigests if %$bindigests;
   $repoinfo->{'arch'} = $repo->{'arch'} if $repo->{'arch'};
   $repoinfo->{'splitdebug'} = $repotype{'splitdebug'}->[0] if defined $dbgsplit;
   $repoinfo->{'subdir'} = $subdir if $subdir;
@@ -3491,6 +3524,7 @@ sub publish {
     'packtrack' => $packtrack,
     'repotags' => \@repotags,
     'chksumfiles' => \@chksumfiles,
+    'renamed' => $renamed,
     'config' => $config,
     'patterninfo' => {},
     'modulemds' => $modulemds,
