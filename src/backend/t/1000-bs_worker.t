@@ -3,7 +3,7 @@
 use strict;
 use warnings;
 
-use Test::More tests => 8;
+use Test::More tests => 17;
 
 
 use FindBin;
@@ -87,6 +87,14 @@ $Test::Mock::BSRPC::fixtures_map = {
   # getsources
   "srcserver/getsources?project=project1&package=package1&srcmd5=$buildinfo->{srcmd5}"
     => 'data/1000/srcserver/getsources',
+
+  # getfollowupsources
+  'reposerver/getjobdata?job=job1&arch=x86_64&jobid=jobid1'
+    => 'data/1000/reposerver/getjobdata_followup1.cpio',
+  'reposerver/getjobdata?job=job2&arch=x86_64&jobid=jobid2'
+    => 'data/1000/reposerver/getjobdata_followup2.cpio',
+  "srcserver/source/project1/package1?rev=$buildinfo->{srcmd5}"
+    => 'data/1000/srcserver/source_project1_package1',
 
   # getbinaries
   'reposerver/getbinaries?project=home:Admin&repository=openSUSE_Tumbleweed&arch=x86_64&binaries=liblua5_4-5,aaa_base,filesystem'
@@ -299,6 +307,56 @@ my $expected_statement_v1 = {
   }
 };
 is_deeply($got, $expected_statement_v1, 'generate_slsa_provenance_statement_v1 - Return value');
+
+# followup build: the results of the previous stage are materials
+
+my $followup_buildinfo = {
+  %$buildinfo,
+  'file' => 'pesign-repackage.spec',
+  'followupfile' => 'pesign-repackage.spec',
+  'followupsteps' => 1,
+  'followup_materials' => [
+    { 'name' => 'hello_world-1-4.1.x86_64.rpm', 'digest' => { 'sha256' => '1111111111111111111111111111111111111111111111111111111111111111' }, 'intent' => 'source' },
+    { 'name' => '_slsa_provenance.0.json', 'digest' => { 'sha256' => '2222222222222222222222222222222222222222222222222222222222222222' }, 'intent' => 'followup' },
+  ],
+};
+$got = JSON::XS::decode_json(generate_slsa_provenance_statement_v1($followup_buildinfo, \@send));
+is_deeply([ grep {!$_->{'uri'}} @{$got->{'predicate'}->{'buildDefinition'}->{'resolvedDependencies'}} ], [
+  { 'name' => 'hello_world-1-4.1.x86_64.rpm', 'digest' => { 'sha256' => '1111111111111111111111111111111111111111111111111111111111111111' }, 'annotations' => { 'intent' => 'source' } },
+  { 'name' => '_slsa_provenance.0.json', 'digest' => { 'sha256' => '2222222222222222222222222222222222222222222222222222222222222222' }, 'annotations' => { 'intent' => 'followup' } },
+], 'generate_slsa_provenance_statement_v1 - followup materials');
+is($got->{'predicate'}->{'buildDefinition'}->{'externalParameters'}->{'recipeFile'}, 'pesign-repackage.spec', 'generate_slsa_provenance_statement_v1 - followup recipe');
+is($got->{'predicate'}->{'buildDefinition'}->{'externalParameters'}->{'followupstep'}, 1, 'generate_slsa_provenance_statement_v1 - followup step');
+$got = JSON::XS::decode_json(generate_slsa_provenance_statement_v02($followup_buildinfo, \@send));
+is_deeply([ grep {!$_->{'uri'}} @{$got->{'predicate'}->{'materials'}} ], [
+  { 'name' => 'hello_world-1-4.1.x86_64.rpm', 'digest' => { 'sha256' => '1111111111111111111111111111111111111111111111111111111111111111' }, 'intent' => 'source' },
+  { 'name' => '_slsa_provenance.0.json', 'digest' => { 'sha256' => '2222222222222222222222222222222222222222222222222222222222222222' }, 'intent' => 'followup' },
+], 'generate_slsa_provenance_statement_v02 - followup materials');
+is($got->{'predicate'}->{'invocation'}->{'parameters'}->{'followupstep'}, 1, 'generate_slsa_provenance_statement_v02 - followup step');
+
+# getfollowupsources
+
+sub sha256str { Digest::SHA::sha256_hex($_[0]) }
+
+$followup_buildinfo = { %$buildinfo, 'reposerver' => 'reposerver', 'arch' => 'x86_64', 'job' => 'job1', 'jobid' => 'jobid1', 'followupfile' => 'pesign-repackage.spec', 'followupsteps' => 1 };
+my $followupdir = "$tmpdir/followup1";
+BSUtil::mkdir_p($followupdir);
+getfollowupsources($followup_buildinfo, $followupdir);
+is_deeply($followup_buildinfo->{'followup_materials'}, [
+  { 'name' => 'hello_world-1-4.1.x86_64.rpm', 'digest' => { 'sha256' => sha256str("rpm1\n") }, 'intent' => 'source' },
+  { 'name' => '_slsa_provenance.0.json', 'digest' => { 'sha256' => sha256str("{\"stage\":1}\n") }, 'intent' => 'followup' },
+  { 'name' => 'pesign-repackage.spec', 'digest' => { 'sha256' => sha256str("spec\n") }, 'intent' => 'source' },
+  { 'name' => 'hello_world.cpio.rsasign', 'digest' => { 'sha256' => sha256str("req\n") }, 'intent' => 'source' },
+  { 'name' => 'hello_world.cpio.rsasign.sig', 'digest' => { 'sha256' => sha256str("sig\n") }, 'intent' => 'source' },
+], 'getfollowupsources - materials of the first followup');
+is_deeply($followup_buildinfo->{'followup_provenance_files'}, { '_slsa_provenance.0.json' => "{\"stage\":1}\n" }, 'getfollowupsources - provenance of the first stage');
+
+$followup_buildinfo = { %$buildinfo, 'reposerver' => 'reposerver', 'arch' => 'x86_64', 'job' => 'job2', 'jobid' => 'jobid2', 'followupfile' => 'pesign-repackage.spec', 'followupsteps' => 2 };
+$followupdir = "$tmpdir/followup2";
+BSUtil::mkdir_p($followupdir);
+getfollowupsources($followup_buildinfo, $followupdir);
+is_deeply([ map {$_->{'name'}} grep {$_->{'intent'} eq 'followup'} @{$followup_buildinfo->{'followup_materials'}} ], [ '_slsa_provenance.0.json', '_slsa_provenance.1.json' ], 'getfollowupsources - materials of the second followup');
+is_deeply($followup_buildinfo->{'followup_provenance_files'}, { '_slsa_provenance.0.json' => "{\"stage\":1}\n", '_slsa_provenance.1.json' => "{\"stage\":2}\n" }, 'getfollowupsources - provenance of the first two stages');
 
 # getbinaries_product
 

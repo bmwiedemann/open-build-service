@@ -1190,8 +1190,29 @@ sub getfollowupsources {
   my $server = $buildinfo->{'reposerver'};
   my $res = getjobdata($buildinfo, $dir);
   die("no old sources in followup job\n") unless @$res;
-  $buildinfo->{'followup_slsa_provenance'} = readstr("$dir/_slsa_provenance.json", 1);
-  $buildinfo->{'followup_slsa_provenance_config'} = readstr("$dir/_slsa_provenance.config", 1);
+  # the results of the previous stage are the materials of this one
+  if ($buildinfo->{'slsaprovenance'}) {
+    my $step = $buildinfo->{'followupsteps'} || 1;
+    my @fmat;
+    my %fprov;
+    for my $ent (@$res) {
+      my $name = $ent->{'name'};
+      next unless defined($name) && -f "$dir/$name";
+      next if $name eq 'logfile' || $name eq 'meta' || $name eq '_statistics' || $name eq 'rpmlint.log' || $name eq '_buildenv' || $name eq '_ccache.tar' || $name eq '_slsa_provenance.config';
+      my $intent = 'source';
+      if ($name eq '_slsa_provenance.json') {
+	$name = '_slsa_provenance.'.($step - 1).'.json';
+	$fprov{$name} = readstr("$dir/$ent->{'name'}");
+	$intent = 'followup';
+      } elsif ($name =~ /^_slsa_provenance\.\d+\.json$/) {
+	$fprov{$name} = readstr("$dir/$name");
+	$intent = 'followup';
+      }
+      push @fmat, { 'name' => $name, 'digest' => { 'sha256' => sha256file("$dir/$ent->{'name'}") }, 'intent' => $intent };
+    }
+    $buildinfo->{'followup_materials'} = \@fmat;
+    $buildinfo->{'followup_provenance_files'} = \%fprov;
+  }
   # need to get buildenv from old sources ;(
   $server = $buildinfo->{'srcserver'} || $srcserver;
   $res = BSRPC::rpc({
@@ -3743,6 +3764,10 @@ sub generate_slsa_provenance_statement_v02 {
   };
   $stmt->{'predicate'}->{'invocation'}->{'parameters'}->{'release'} = $buildinfo->{'release'} if defined $buildinfo->{'release'};
   $stmt->{'predicate'}->{'invocation'}->{'parameters'}->{'buildflavor'} = $buildinfo->{'buildflavor'} if defined $buildinfo->{'buildflavor'};
+  if ($buildinfo->{'followup_materials'}) {
+    push @materials, { 'name' => $_->{'name'}, 'digest' => $_->{'digest'}, 'intent' => $_->{'intent'} } for @{$buildinfo->{'followup_materials'}};
+    $stmt->{'predicate'}->{'invocation'}->{'parameters'}->{'followupstep'} = $buildinfo->{'followupsteps'} || 1;
+  }
   return provenance_tojson($stmt);
 }
 
@@ -3764,7 +3789,7 @@ sub generate_slsa_provenance_statement_v1 {
   my $subject = generate_slsa_provenance_subject($send);
   my $sourceuri = generate_slsa_sourceuri($buildinfo);
   # make intent an annotation
-  my @materials = map { { %$_ } } @{$buildinfo->{'materials'} || []};
+  my @materials = map { { %$_ } } (@{$buildinfo->{'materials'} || []}, @{$buildinfo->{'followup_materials'} || []});
   for (@materials) {
     my $i = delete $_->{'intent'};
     $_->{'annotations'}->{'intent'} = $i if $i;
@@ -3797,6 +3822,7 @@ sub generate_slsa_provenance_statement_v1 {
   $external_params->{'buildflavor'} = $buildinfo->{'buildflavor'} if defined $buildinfo->{'buildflavor'};
   $external_params->{'disturl'} = $buildinfo->{'provenance_disturl'} if defined $buildinfo->{'provenance_disturl'};
   $external_params->{'vcs'} = $buildinfo->{'provenance_vcs'} if defined $buildinfo->{'provenance_vcs'};
+  $external_params->{'followupstep'} = $buildinfo->{'followupsteps'} || 1 if $buildinfo->{'followup_materials'};
   return provenance_tojson($stmt);
 }
 
@@ -3919,6 +3945,7 @@ sub dobuild {
       $buildinfo->{'_no_container_normalization'} = 1;
       $buildinfo->{'followup_slsa_provenance'} = readstr("$srcdir/_slsa_provenance.json", 1);
       $buildinfo->{'followup_slsa_provenance_config'} = readstr("$srcdir/_slsa_provenance.config", 1);
+      $buildinfo->{'followup_slsa_provenance_copy'} = 1;
     }
     @meta = split("\n", readstr("$srcdir/meta"));
   } elsif ($followupmode) {
@@ -5045,10 +5072,10 @@ if ($ex == 0) {
   @send = grep {$_->{'name'} ne '_generated_buildreqs'} @send;
 
   # add slsa provenance files if requested
-  @send = grep {$_->{'name'} !~ /slsa_provenance.(?:json|config)$/} @send;
+  @send = grep {$_->{'name'} !~ /slsa_provenance(?:\.\d+)?\.(?:json|config)$/} @send;
   if ($buildinfo->{'slsaprovenance'}) {
     my $slsa_provenance;
-    if ($buildinfo->{'followupfile'} && $buildinfo->{'followup_slsa_provenance'}) {
+    if ($buildinfo->{'followupfile'} && $buildinfo->{'followup_slsa_provenance'} && $buildinfo->{'followup_slsa_provenance_copy'}) {
       $slsa_provenance = $buildinfo->{'followup_slsa_provenance'};
       $buildinfo->{'slsa_provenance_config'} = $buildinfo->{'followup_slsa_provenance_config'} if $buildinfo->{'followup_slsa_provenance_config'};
     } elsif (($buildinfo->{'slsa_provenance_version'} || '') eq 'v1') {
@@ -5058,6 +5085,9 @@ if ($ex == 0) {
     }
     push @send, { 'name' => '_slsa_provenance.json', 'data' => $slsa_provenance };
     push @send, { 'name' => '_slsa_provenance.config', 'data' => $buildinfo->{'slsa_provenance_config'}} if $buildinfo->{'slsa_provenance_config'};
+    # re-publish the provenance of the previous stages
+    my $fprov = $buildinfo->{'followup_provenance_files'} || {};
+    push @send, { 'name' => $_, 'data' => $fprov->{$_} } for sort keys %$fprov;
   }
   
   if ($kiwitree) {

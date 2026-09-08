@@ -291,7 +291,7 @@ sub prpfinished {
     my $debian = grep {/\.dsc$/} @all;
     my $nosourceaccess = $all{'.nosourceaccess'};
     @all = grep {!$publish_ignore{$_} && !/^\./} @all;
-    @all = grep {!/slsa_provenance\.json$/} @all;
+    @all = grep {!/slsa_provenance(?:\.\d+)?\.json$/} @all;
     my $noorphanedsrcrpms = $bconf && $bconf->{'publishflags:noorphanedsrcrpms'} ? 1: 0;
     if ($noorphanedsrcrpms) {
       # move src rpms to the back of the array
